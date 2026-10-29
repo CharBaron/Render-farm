@@ -1,0 +1,55 @@
+# Kairos render farm — installed at .github/workflows/render.yml by gh_render.py (private repo; never make public).
+# Inputs are produced by gh_render.py: the episode pack lives on an orphan branch, the job list is JSON.
+name: render
+run-name: render ${{ inputs.tag }}
+on:
+  workflow_dispatch:
+    inputs:
+      tag:       {description: "unique run tag", required: true}
+      in_branch: {description: "orphan branch holding pack.tgz.part*", required: true}
+      jobs:      {description: "JSON list of {id, chunks:[[a,b,name],...]}", required: true}
+      pip:       {description: "pip requirements (space separated)", required: false, default: "skia-python numpy"}
+      apt:       {description: "extra apt packages besides ffmpeg", required: false, default: "libegl1"}
+      runner:    {description: "runner label (ubuntu-24.04 = x86_64, ubuntu-24.04-arm = aarch64 like the sandbox)", required: false, default: "ubuntu-24.04-arm"}
+permissions:
+  contents: read
+  actions: read
+jobs:
+  render:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        job: ${{ fromJSON(inputs.jobs) }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.in_branch }}", path: in, fetch-depth: 1}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-${{ inputs.pip }}
+      - name: setup
+        run: |
+          T0=$(date +%s)
+          (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg ${{ inputs.apt }} >/dev/null) &
+          pip install -q ${{ inputs.pip }} &
+          wait
+          mkdir ep && cat in/pack.tgz.part* | tar xz -C ep
+          ffmpeg -version | head -1; (cd ep; LD_LIBRARY_PATH=$PWD/lib python -c "import skia, numpy; print('skia', skia.__version__, 'numpy', numpy.__version__)") || echo "skia import check failed (episode env may fix it)"
+          echo "setup_s=$(( $(date +%s) - T0 ))"
+      - name: render
+        env:
+          JOB: ${{ toJSON(matrix.job) }}
+        working-directory: ep
+        run: python3 _gh_job.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: out-${{ matrix.job.id }}
+          path: ep/_gh_out/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: warn
